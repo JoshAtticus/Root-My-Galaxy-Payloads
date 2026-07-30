@@ -51,6 +51,10 @@
 #define SKB_DATA_DELTA (-0xe80LL)
 #endif
 
+/* Runtime skb linear-vs-pointer base adjustment (see select_skb_data_delta). */
+extern long g_skb_data_delta;
+void select_skb_data_delta(void);
+
 #define ASHMEM_NAME_LEN 256
 #define __ASHMEMIOC 0x77
 #define ASHMEM_SET_NAME _IOW(__ASHMEMIOC, 1, char[ASHMEM_NAME_LEN])

