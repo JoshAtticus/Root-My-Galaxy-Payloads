@@ -4,7 +4,19 @@ OUTDIR ?= build/$(TARGET)
 
 TARGET_HEADER := src/targets/$(TARGET)/target.h
 TARGET_INCLUDE := targets/$(TARGET)/target.h
-TARGET_CC := $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android$(API)-clang
+
+# Prefer host-native NDK prebuilt (Linux CI / Windows local).
+UNAME_S := $(shell uname -s 2>/dev/null)
+ifeq ($(OS),Windows_NT)
+NDK_HOST_TAG ?= windows-x86_64
+TARGET_CC := $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/$(NDK_HOST_TAG)/bin/aarch64-linux-android$(API)-clang.cmd
+else ifeq ($(UNAME_S),Darwin)
+NDK_HOST_TAG ?= darwin-x86_64
+TARGET_CC := $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/$(NDK_HOST_TAG)/bin/aarch64-linux-android$(API)-clang
+else
+NDK_HOST_TAG ?= linux-x86_64
+TARGET_CC := $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/$(NDK_HOST_TAG)/bin/aarch64-linux-android$(API)-clang
+endif
 
 ifeq ($(wildcard $(TARGET_CC)),)
 $(error set ANDROID_NDK_HOME to an Android NDK containing $(TARGET_CC))
