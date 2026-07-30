@@ -200,9 +200,33 @@ uint32_t __futex_hash(futex_key_t *key, uint32_t futex_hashsize)
 }
 
 unsigned long futex_hashsize = (unsigned long)-1;
+
+/* Match kernel futex_hashsize = roundup_pow_of_two(256 * num_possible_cpus()). */
+static unsigned long ks_roundup_pow_of_two(unsigned long v)
+{
+    if (v < 2)
+        return 2;
+    v--;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    v |= v >> 32;
+    return v + 1;
+}
+
 void futex_init(void)
 {
-    futex_hashsize = SYSCHK(sysconf(_SC_NPROCESSORS_ONLN) * 256);
+    long online = sysconf(_SC_NPROCESSORS_ONLN);
+    if (online < 1)
+        online = 1;
+    /*
+     * Kernel uses num_possible_cpus(); online can under-count hotplugged
+     * masks. Prefer a power-of-two table size — a non-PoT mask desyncs
+     * userspace jhash from the kernel and produces unmapped false mm bases.
+     */
+    futex_hashsize = ks_roundup_pow_of_two((unsigned long)online * 256UL);
 }
 uint32_t futex_hash(size_t addr, size_t mm)
 {

