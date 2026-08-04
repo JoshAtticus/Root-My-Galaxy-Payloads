@@ -58,6 +58,12 @@
 /* Runtime skb linear-vs-pointer base adjustment (see select_skb_data_delta). */
 extern long g_skb_data_delta;
 void select_skb_data_delta(void);
+#if defined(APP_PHYS_P0_ORACLE) && APP_PHYS_P0_ORACLE
+/* Which pipe_inode_info slot inside the order-3 page to use as gate_target. */
+extern int g_p0_gate_object_index;
+void select_p0_gate_object_index(void);
+int is_plausible_page_struct(uintptr_t page);
+#endif
 int is_plausible_reclaim_base(uintptr_t base);
 /* Double-scan KernelSnitch; returns leaked mm or (uintptr_t)-1. Does not cleanup. */
 uintptr_t kernelsnitch_stable_mm_leak(void);

